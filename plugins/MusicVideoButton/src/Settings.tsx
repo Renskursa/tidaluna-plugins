@@ -3,6 +3,6 @@ import { LunaSettings, LunaTitle } from "@luna/ui";
 
 export const Settings = () => (
     <LunaSettings>
-        <LunaTitle>Play Music Video</LunaTitle>
+        <LunaTitle>Music Video Button</LunaTitle>
     </LunaSettings>
 );
