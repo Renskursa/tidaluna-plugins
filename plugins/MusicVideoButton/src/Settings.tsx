@@ -10,7 +10,7 @@ export const Settings = () => {
   const [seekOnSwitch, setSeekOnSwitch] = React.useState<boolean>(storage.seekOnSwitch);
 
   return (
-    <LunaSettings title="Music Video Button">
+    <LunaSettings>
       <LunaSwitchSetting
         {...({
           title: "Resume position when switching",
