@@ -1,8 +1,25 @@
 import React from "react";
-import { LunaSettings, LunaTitle } from "@luna/ui";
+import { ReactiveStore } from "@luna/core";
+import { LunaSettings, LunaSwitchSetting } from "@luna/ui";
 
-export const Settings = () => (
-    <LunaSettings>
-        <LunaTitle>Music Video Button</LunaTitle>
+export const storage = await ReactiveStore.getPluginStorage("MusicVideoButton", {
+  seekOnSwitch: true
+});
+
+export const Settings = () => {
+  const [seekOnSwitch, setSeekOnSwitch] = React.useState<boolean>(storage.seekOnSwitch);
+
+  return (
+    <LunaSettings title="Music Video Button">
+      <LunaSwitchSetting
+        {...({
+          title: "Resume position when switching",
+          checked: seekOnSwitch,
+          onChange: (_: React.ChangeEvent<HTMLInputElement>, checked: boolean) => {
+            setSeekOnSwitch((storage.seekOnSwitch = checked));
+          },
+        } as any)}
+      />
     </LunaSettings>
-);
+  );
+};
