@@ -1,0 +1,11 @@
+{
+	"name": "Music Video Button",
+	"description": "Adds a button to swap between music videos and tracks in the now playing similar to Spotify.",
+	"author": {
+		"name": "Renskursa",
+		"url": "https://github.com/Renskursa",
+		"avatarUrl": "https://avatars.githubusercontent.com/u/91384515?v=4"
+	},
+	"main": "./src/index.ts",
+	"type": "module"
+}
