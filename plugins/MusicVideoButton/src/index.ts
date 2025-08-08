@@ -1,57 +1,67 @@
-import { LunaUnload } from "@luna/core";
+import { LunaUnload, Tracer } from "@luna/core";
 import { MediaItem, TidalApi, redux, observe } from "@luna/lib";
 
 export { Settings } from "./Settings";
-import { storage } from "./Settings";
 
 export const unloads = new Set<LunaUnload>();
+const { trace, errSignal } = Tracer("[MusicVideoButton]");
+export { errSignal };
 
-const trackVideoMappings = new Map<number, { trackId: number; videoId: number }>();
-const failedMappings = new Set<string>();
-const inflight = new Map<string, Promise<{ trackId: number; videoId: number } | undefined>>();
-const pendingSeeks = new Map<number, number>();
+const songToVideoMappings = new Map<number, { trackId: number; videoId: number }>();
+const failedSearches = new Set<string>();
+const ongoingSearches = new Map<string, Promise<{ trackId: number; videoId: number } | undefined>>();
+const seekPositions = new Map<number, number>();
 
-function pruneCache<K, V>(cache: Map<K, V>) {
-    if (cache.size > 1000) {
-        const entries = Array.from(cache.entries()).slice(-500);
+function pruneCache<K, V>(cache: Map<K, V>, maxSize = 1000, keepSize = 500) {
+    if (cache.size > maxSize) {
+        const entries = Array.from(cache.entries()).slice(-keepSize);
         cache.clear();
-        for (const [key, value] of entries) cache.set(key, value);
+        entries.forEach(([k, v]) => cache.set(k, v));
     }
 }
 
-function pruneSet<T>(set: Set<T>) {
-    if (set.size > 1000) {
-        const entries = Array.from(set).slice(-500);
+function pruneSet<T>(set: Set<T>, maxSize = 1000, keepSize = 500) {
+    if (set.size > maxSize) {
+        const entries = Array.from(set).slice(-keepSize);
         set.clear();
-        for (const item of entries) set.add(item);
+        entries.forEach(item => set.add(item));
     }
 }
 
-async function findFirstExistingId(items: any[], type: "track" | "video", originalTitle?: string): Promise<number | undefined> {
-    if (type === "track" && originalTitle) {
-        const normalizedOriginal = normalizeTitle(originalTitle);
-        const candidates: { id: number; score: number }[] = [];
-        for (const item of items) {
-            const title = String(item.title ?? "");
-            const score = scoreTitleMatch(normalizedOriginal, title);
-            candidates.push({ id: item.id, score });
+async function findBestMatchingId(items: any[], type: "track" | "video", originalTitle?: string): Promise<number | undefined> {
+    if (!items?.length) return undefined;
+    
+    const normalizedOriginal = originalTitle ? normalizeTitle(originalTitle) : undefined;
+    if (normalizedOriginal) {
+        const candidates = items.map(item => ({
+            id: item.id,
+            score: scoreTitleMatch(normalizedOriginal, String(item.title ?? ""))
+        })).sort((a, b) => b.score - a.score);
+        
+        for (const { id, score } of candidates.slice(0, 3)) {
+            if (score > 0) {
+                try {
+                    await MediaItem.fromId(id, type);
+                    return id;
+                } catch { /* Item not accessible */ }
+            }
         }
-        candidates.sort((a, b) => b.score - a.score);
-        for (const { id } of candidates) {
-            if (await MediaItem.fromId(id, type)) return id;
-        }
-    } else {
-        for (const item of items) {
-            if (await MediaItem.fromId(item.id, type)) return item.id;
-        }
+        return undefined;
+    }
+    
+    for (const item of items) {
+        try {
+            await MediaItem.fromId(item.id, type);
+            return item.id;
+        } catch { /* Item not accessible */ }
     }
     return undefined;
 }
 
 export function clearCaches() {
-    trackVideoMappings.clear();
-    failedMappings.clear();
-    inflight.clear();
+    songToVideoMappings.clear();
+    failedSearches.clear();
+    ongoingSearches.clear();
 }
 
 function getCurrentSeekSeconds(): number {
@@ -68,223 +78,153 @@ function getCurrentSeekSeconds(): number {
 }
 
 unloads.add(() => {
-    for (const el of document.querySelectorAll('li.play-mv-tab')) el.remove();
+    for (const el of document.querySelectorAll('button.mv-taskbar-button')) el.remove();
     clearCaches();
 });
 
-async function findTrackVideoMapping(title: string, artist: string): Promise<{ trackId: number; videoId: number } | undefined> {
+async function findSongVideoPair(title: string, artist: string): Promise<{ trackId: number; videoId: number } | undefined> {
     const searchKey = `${artist.toLowerCase()} - ${title.toLowerCase()}`;
-    if (failedMappings.has(searchKey)) return undefined;
-    if (inflight.has(searchKey)) return inflight.get(searchKey);
+    if (failedSearches.has(searchKey)) return undefined;
     
-    const p = (async () => {
-        const query = `${title} ${artist}`.trim();
+    const existing = ongoingSearches.get(searchKey);
+    if (existing) return existing;
+    
+    const searchPromise = performSearch(title, artist, searchKey);
+    ongoingSearches.set(searchKey, searchPromise);
+    
+    return searchPromise.finally(() => ongoingSearches.delete(searchKey));
+}
+
+async function performSearch(title: string, artist: string, searchKey: string): Promise<{ trackId: number; videoId: number } | undefined> {
+    try {
+        const searchQuery = `${title} ${artist}`.trim();
         const headers = await TidalApi.getAuthHeaders();
+        const baseUrl = 'https://desktop.tidal.com/v1/search';
+        const commonParams = `query=${encodeURIComponent(searchQuery)}&limit=10&${TidalApi.queryArgs()}`;
+        
         const [trackRes, videoRes] = await Promise.all([
-            fetch(`https://desktop.tidal.com/v1/search?query=${encodeURIComponent(query)}&types=TRACKS&limit=10&${TidalApi.queryArgs()}`, { headers }),
-            fetch(`https://desktop.tidal.com/v1/search?query=${encodeURIComponent(query)}&types=VIDEOS&limit=10&${TidalApi.queryArgs()}`, { headers })
+            fetch(`${baseUrl}?${commonParams}&types=TRACKS`, { headers }),
+            fetch(`${baseUrl}?${commonParams}&types=VIDEOS`, { headers })
         ]);
         
-        if (!trackRes.ok || !videoRes.ok) return undefined;
+        if (!trackRes.ok || !videoRes.ok) {
+            failedSearches.add(searchKey);
+            return undefined;
+        }
         
-        const [trackJson, videoJson] = await Promise.all([trackRes.json(), videoRes.json()]);
-        const tracks: any[] = trackJson?.tracks?.items ?? [];
-        const videos: any[] = videoJson?.videos?.items ?? [];
-        
-        const trackId = await findFirstExistingId(tracks, "track", title);
-        const videoId = await findBestMatchingVideoId(videos, title);
+        const [trackData, videoData] = await Promise.all([trackRes.json(), videoRes.json()]);
+        const [trackId, videoId] = await Promise.all([
+            findBestMatchingId(trackData?.tracks?.items ?? [], "track", title),
+            findBestMatchingId(videoData?.videos?.items ?? [], "video", title)
+        ]);
         
         if (trackId && videoId) {
             const mapping = { trackId, videoId };
-            trackVideoMappings.set(trackId, mapping);
-            trackVideoMappings.set(videoId, mapping);
-            pruneCache(trackVideoMappings);
+            songToVideoMappings.set(trackId, mapping);
+            songToVideoMappings.set(videoId, mapping);
+            pruneCache(songToVideoMappings);
             return mapping;
         }
         
-        failedMappings.add(searchKey);
-        pruneSet(failedMappings);
+        failedSearches.add(searchKey);
+        pruneSet(failedSearches);
         return undefined;
-    })();
-    
-    inflight.set(searchKey, p);
-    return await p.finally(() => inflight.delete(searchKey));
+    } catch {
+        failedSearches.add(searchKey);
+        pruneSet(failedSearches);
+        return undefined;
+    }
 }
 
 async function resolveMapping(media: MediaItem): Promise<{ trackId: number; videoId: number } | undefined> {
-    const cached = trackVideoMappings.get(media.id as number);
+    const cached = songToVideoMappings.get(Number(media.id));
     if (cached) return cached;
     
-    const title = media.tidalItem?.title ?? (await media.title());
-    const artist = (await media.artist())?.name ?? "";
-    return findTrackVideoMapping(title, artist);
+    try {
+        const title = media.tidalItem?.title ?? (await media.title());
+        const artist = media.tidalItem?.artist?.name ?? (await media.artist())?.name ?? "";
+        
+        if (!title) return undefined;
+        return findSongVideoPair(title, artist);
+    } catch {
+        return undefined;
+    }
 }
 
-async function replaceCurrentWithMediaItem(targetId: number, type: "track" | "video", startAt?: number) {
-    await MediaItem.fromId(targetId, type);
-    const state = redux.store.getState() as any;
-    const pq = state?.playQueue;
-    const currentIndex = pq?.currentIndex ?? -1;
-    const currentElem = pq?.elements?.[currentIndex];
-    const context = currentElem?.context ?? { type: "active" };
-    if (startAt !== undefined) pendingSeeks.set(targetId, startAt);
-
-    if (!pq || currentIndex < 0 || !currentElem) {
-        await redux.actions["playQueue/ADD_NOW"]({ context: { type: "active" }, mediaItemIds: [targetId] });
+async function switchToMediaItem(targetId: number, type: "track" | "video", startAt?: number) {
+    try {
+        await MediaItem.fromId(targetId, type);
+        
+        if (startAt !== undefined) {
+            seekPositions.set(targetId, startAt);
+        }
+        
+        const state = redux.store.getState() as any;
+        const pq = state?.playQueue;
+        const currentIndex = pq?.currentIndex ?? -1;
+        const currentElem = pq?.elements?.[currentIndex];
+        
+        if (!pq || currentIndex < 0 || !currentElem) {
+            await redux.actions["playQueue/ADD_NOW"]({ context: { type: "active" }, mediaItemIds: [targetId] });
+            await redux.actions["playbackControls/PLAY"]();
+            return;
+        }
+        
+        const context = currentElem.context ?? { type: "active" };
+        const oldUid = currentElem.uid;
+        
+        await redux.actions["playQueue/ADD_AT_INDEX"]({ context, mediaItemIds: [targetId], index: currentIndex + 1 });
+        await redux.actions["playQueue/MOVE_TO"](currentIndex + 1);
         await redux.actions["playbackControls/PLAY"]();
-        return;
+        
+        if (oldUid) {
+            await redux.actions["playQueue/REMOVE_ELEMENT"]({ uid: oldUid });
+        }
+    } catch (err) {
+        trace.err.withContext("Failed to switch media item")(err as any);
     }
-
-    const oldUid = currentElem?.uid;
-    await redux.actions["playQueue/ADD_AT_INDEX"]({ context, mediaItemIds: [targetId], index: currentIndex + 1 });
-    await redux.actions["playQueue/MOVE_TO"](currentIndex + 1);
-    await redux.actions["playbackControls/PLAY"]();
-    if (oldUid) await redux.actions["playQueue/REMOVE_ELEMENT"]({ uid: oldUid });
 }
 
 MediaItem.onMediaTransition(unloads, async (media) => {
-    if (media.contentType === "track" || media.contentType === "video") void resolveMapping(media);
-    const pending = pendingSeeks.get(media.id as number);
-    if (pending !== undefined) {
-        setTimeout(() => {
-            redux.actions["playbackControls/SEEK"](pending);
-        }, 150);
-        pendingSeeks.delete(media.id as number);
+    if (media.contentType === "track" || media.contentType === "video") {
+        resolveMapping(media).catch(() => {});
     }
-    void updateTabEntryLabel();
+    
+    const pending = seekPositions.get(Number(media.id));
+    if (pending !== undefined) {
+        redux.actions["playbackControls/SEEK"](pending);
+        seekPositions.delete(Number(media.id));
+    }
+    
+    createOrUpdateTaskbarButton().catch(() => {});
 });
 
-async function onNowPlayingButtonClick() {
+async function onButtonClick() {
+    const { storage } = await import("./Settings");
     const { item: current, type } = await getCurrentMedia();
     if (!current) return;
-
+    
     const effectiveType = getEffectiveType(current, type);
     const mapping = await resolveMapping(current);
-    if (effectiveType === 'track') {
-        const vid = mapping?.videoId;
-        if (vid) {
-            const seek = storage.seekOnSwitch ? getCurrentSeekSeconds() : undefined;
-            await replaceCurrentWithMediaItem(vid, "video", seek);
-        }
-    } else if (effectiveType === 'video') {
-        const tid = mapping?.trackId;
-        if (tid) {
-            const seek = storage.seekOnSwitch ? getCurrentSeekSeconds() : undefined;
-            await replaceCurrentWithMediaItem(tid, "track", seek);
-        }
+    if (!mapping) return;
+    
+    const seekPosition = storage.seekOnSwitch ? getCurrentSeekSeconds() : undefined;
+    
+    if (effectiveType === 'track' && mapping.videoId) {
+        await switchToMediaItem(mapping.videoId, "video", seekPosition);
+    } else if (effectiveType === 'video' && mapping.trackId) {
+        await switchToMediaItem(mapping.trackId, "track", seekPosition);
     }
 }
 
-observe(unloads, 'li[data-test="tabs-play-queue"]', (queueLi: HTMLLIElement) => {
-    const ul = queueLi.closest('ul[role="tablist"]') as HTMLUListElement | null;
-    if (!ul) return;
-    void ensureOrUpdateTabEntry(ul);
+// Monitor taskbar container
+observe(unloads, 'div._moreContainer_f6162c8', () => {
+    createOrUpdateTaskbarButton().catch(() => {});
 });
-
-async function ensureOrUpdateTabEntry(ul: HTMLUListElement) {
-    let li = ul.querySelector<HTMLLIElement>('li.play-mv-tab');
-    if (!li) {
-        const template = ul.querySelector<HTMLLIElement>('li._tabItem_8436610') || ul.querySelector('li');
-        if (!template) return;
-        li = template.cloneNode(true) as HTMLLIElement;
-        li.classList.add('play-mv-tab');
-        li.setAttribute('data-test', 'tabs-mv-toggle');
-        li.setAttribute('aria-selected', 'false');
-        li.setAttribute('aria-disabled', 'false');
-        li.tabIndex = 0;
-        li.id = 'tab:mv-toggle';
-        li.setAttribute('aria-controls', 'panel:mv-toggle');
-        resetTabSelectionState(li);
-        li.onclick = (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            void onNowPlayingButtonClick();
-        };
-        let svg = li.querySelector('svg');
-        if (!svg) {
-            svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-            svg.setAttribute('viewBox', '0 0 24 24');
-            svg.classList.add('_icon_77f3f89');
-            li.prepend(svg);
-        }
-        svg.innerHTML = '';
-        let span = li.querySelector('span.wave-text-description-demi');
-        if (!span) {
-            span = document.createElement('span');
-            span.classList.add('wave-text-description-demi');
-            li.appendChild(span);
-        }
-        ul.appendChild(li);
-    }
-    resetTabSelectionState(li);
-    await updateTabEntryLabel();
-}
-
-async function updateTabEntryLabel() {
-    const { item: current, type } = await getCurrentMedia();
-    const li = document.querySelector<HTMLLIElement>('ul[role="tablist"] li.play-mv-tab');
-    if (!li) return;
-
-    const svg = li.querySelector('svg');
-    const label = li.querySelector('span.wave-text-description-demi') as HTMLSpanElement | null;
-
-    resetTabSelectionState(li);
-    const effectiveType = getEffectiveType(current, type);
-
-    if (!current || !effectiveType) {
-        li.style.display = 'none';
-        return;
-    }
-
-    const mapping = await resolveMapping(current);
-    if (effectiveType === 'track') {
-        const vid = mapping?.videoId;
-        if (!vid) {
-            li.style.display = 'none';
-            return;
-        }
-        li.style.display = '';
-        if (svg) svg.innerHTML = '<path d="M17 10.5V7c0-1.1-.9-2-2-2H4C2.9 5 2 5.9 2 7v10c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2v-3.5l4 4v-11l-4 4z"/>';
-        if (label) label.textContent = 'Music Video';
-    } else if (effectiveType === 'video') {
-        const tid = mapping?.trackId;
-        if (!tid) {
-            li.style.display = 'none';
-            return;
-        }
-        li.style.display = '';
-        if (svg) svg.innerHTML = '<path d="M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z"/>';
-        if (label) label.textContent = 'Track';
-    } else {
-        li.style.display = 'none';
-    }
-}
-
-function resetTabSelectionState(li: HTMLLIElement) {
-    li.setAttribute('aria-selected', 'false');
-    for (const c of Array.from(li.classList)) {
-        if (c.includes('activeTab') || c.includes('react-tabs__tab--selected')) li.classList.remove(c);
-    }
-}
 
 function getEffectiveType(current?: MediaItem, fallback?: 'track' | 'video') {
     const storeType = current ? getMediaTypeById(current.id) : undefined;
     return (storeType ?? fallback ?? current?.contentType) as 'track' | 'video' | undefined;
-}
-
-async function findBestMatchingVideoId(items: any[], originalTitle: string): Promise<number | undefined> {
-    const normalizedOriginal = normalizeTitle(originalTitle);
-    const candidates: { id: number; score: number }[] = [];
-    for (const item of items) {
-        const title = String(item.title ?? "");
-        const score = scoreTitleMatch(normalizedOriginal, title);
-        candidates.push({ id: item.id, score });
-    }
-    candidates.sort((a, b) => b.score - a.score);
-    for (const { id } of candidates) {
-        if (await MediaItem.fromId(id, "video")) return id;
-    }
-    return undefined;
 }
 
 function normalizeTitle(s: string): string {
@@ -293,46 +233,192 @@ function normalizeTitle(s: string): string {
 
 function scoreTitleMatch(normalizedOriginal: string, candidateTitle: string): number {
     const t = normalizeTitle(candidateTitle);
-    if (t === normalizedOriginal) return 1000;
-
-    let score = 0;
-    if (t.startsWith(normalizedOriginal)) score += 200;
-    if (t.includes(normalizedOriginal)) score += 100;
     
-    const positiveKeywords = ["official music video", "music video", "official video", "official mv", "mv"];
-    for (const kw of positiveKeywords) {
-        if (t.includes(kw)) score += 80;
+    if (!t.includes(normalizedOriginal)) return 0;
+    if (!hasStrictBoundary(t, normalizedOriginal)) return 0;
+    
+    const rejectKeywords = ["behind the scenes", "bts", "interview", "making of", "live", "remix", "teaser", "trailer", "snippet", "shorts", "reaction", "fan", "cover", "dance", "lyrics"];
+    for (const kw of rejectKeywords) {
+        if (t.includes(kw)) return 0;
     }
+    
+    if (t === normalizedOriginal) return 1000;
+    
+    const officialKeywords = ["official music video", "official video", "music video", "official mv", "mv"];
+    for (const kw of officialKeywords) {
+        if (t.includes(kw)) return 900;
+    }
+    
+    const songName = extractSongName(t);
+    if (songName === normalizedOriginal) return 800;
+    
+    if (t.startsWith(normalizedOriginal + " ")) return 700;
+    if (t.startsWith(normalizedOriginal)) return 600;
+    
+    if (t.includes(" " + normalizedOriginal + " ")) return 500;
+    if (t.includes(normalizedOriginal)) return 400;
+    
+    return 0;
+}
 
-    const penaltyKeywords = ["behind the scenes", "bts", "interview", "making of", "live", "remix", "teaser", "trailer", "snippet", "shorts", "reaction", "fan", "cover", "dance", "lyrics"];
-    const bracketContent = t.match(/[[(](.*?)[\])]/g) || [];
-    for (const kw of penaltyKeywords) {
-        if (t.includes(kw)) score -= 50;
+function hasStrictBoundary(title: string, normalizedOriginal: string): boolean {
+    const idx = title.indexOf(normalizedOriginal);
+    if (idx < 0) return false;
+    let after = title.slice(idx + normalizedOriginal.length).trim();
+    if (after.length === 0) return true;
+    after = after.replace(/^[-–—:|•~*.,'"\s]+/, "").trim();
+    if (after.length === 0) return true;
+    const allowed = [
+        "official music video",
+        "official video",
+        "music video",
+        "official mv",
+        "mv",
+        "video",
+        "hd",
+        "4k",
+        "uhd"
+    ];
+    if (after.startsWith("(") || after.startsWith("[")) {
+        const m = after.match(/^[(\[]\s*([^\]\)]*?)\s*[)\]](.*)$/);
+        if (!m) return false;
+        const content = normalizeTitle(m[1]);
+        if (!allowed.includes(content)) return false;
+        const rest = m[2].replace(/^[-–—:|•~*.,'"\s]+/, "").trim();
+        return rest.length === 0;
     }
-    if (bracketContent.length > 0) score -= 20 * bracketContent.length;
-    score -= Math.min(50, Math.max(0, t.length - normalizedOriginal.length));
-    return score;
+    for (const suf of allowed) {
+        if (after.startsWith(suf)) {
+            const rest = after.slice(suf.length).replace(/^[-–—:|•~*.,'"\s]+/, "").trim();
+            return rest.length === 0;
+        }
+    }
+    return after.length <= 8;
+}
+
+function extractSongName(title: string): string {
+    const suffixes = [
+        "official music video",
+        "music video", 
+        "official video",
+        "official mv",
+        "mv",
+        "official",
+        "video"
+    ];
+    
+    let cleaned = title;
+    for (const suffix of suffixes) {
+        if (cleaned.endsWith(suffix)) {
+            cleaned = cleaned.substring(0, cleaned.length - suffix.length).trim();
+        }
+    }
+    
+    // Remove content in brackets/parentheses
+    cleaned = cleaned.replace(/[[(].*?[\])]/g, "").trim();
+    
+    return cleaned;
 }
 
 async function getCurrentMedia(): Promise<{ item?: MediaItem; type?: "track" | "video" }> {
-    const controls = redux.store.getState().playbackControls;
-    const ctx = controls?.playbackContext;
-    if (ctx?.actualProductId !== undefined) {
-        const storeType = getMediaTypeById(ctx.actualProductId);
-        const inferredType = storeType || (ctx.actualVideoQuality === null ? 'track' : 'video');
-        const item = await MediaItem.fromId(ctx.actualProductId, inferredType);
-        return { item, type: inferredType };
-    }
-    const mp = controls?.mediaProduct;
-    const productType = mp?.productType === 'video' ? 'video' : mp?.productType === 'track' ? 'track' : undefined;
-    if (mp?.productId !== undefined && productType) {
-        const item = await MediaItem.fromId(mp.productId, productType);
-        return { item, type: productType };
-    }
+    try {
+        const controls = redux.store.getState().playbackControls;
+        const ctx = controls?.playbackContext;
+        
+        if (ctx?.actualProductId !== undefined) {
+            const storeType = getMediaTypeById(ctx.actualProductId);
+            const inferredType = storeType || (ctx.actualVideoQuality === null ? 'track' : 'video');
+            const item = await MediaItem.fromId(ctx.actualProductId, inferredType);
+            return { item, type: inferredType };
+        }
+        
+        const mp = controls?.mediaProduct;
+        if (mp?.productId !== undefined && mp?.productType) {
+            const productType = mp.productType === 'video' ? 'video' : 'track';
+            const item = await MediaItem.fromId(mp.productId, productType);
+            return { item, type: productType };
+        }
+    } catch { /* Media item not accessible */ }
+    
     return {};
 }
 
 function getMediaTypeById(id: number | string): "track" | "video" | undefined {
     const media = (redux.store.getState().content?.mediaItems ?? {})[String(id)] as any;
     return media?.type;
+}
+
+async function createOrUpdateTaskbarButton() {
+    const { item: current, type } = await getCurrentMedia();
+    const effectiveType = getEffectiveType(current, type);
+    
+    if (!current || !effectiveType) {
+        removeTaskbarButton();
+        return;
+    }
+    
+    const mapping = await resolveMapping(current);
+    const { hasValidMapping, svgContent } = getButtonConfig(effectiveType, mapping);
+    
+    if (!hasValidMapping) {
+        removeTaskbarButton();
+        return;
+    }
+    
+    const container = document.querySelector('div._moreContainer_f6162c8');
+    if (!container) {
+        removeTaskbarButton();
+        return;
+    }
+    
+    const button = getOrCreateButton(container);
+    const svg = button.querySelector('svg');
+    if (svg) {
+        svg.innerHTML = svgContent;
+    }
+}
+
+function getButtonConfig(effectiveType: string, mapping?: { trackId: number; videoId: number }) {
+    if (effectiveType === 'track') {
+        return {
+            hasValidMapping: !!mapping?.videoId,
+            svgContent: '<path d="M17 10.5V7c0-1.1-.9-2-2-2H4C2.9 5 2 5.9 2 7v10c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2v-3.5l4 4v-11l-4 4z"/>'
+        };
+    }
+    if (effectiveType === 'video') {
+        return {
+            hasValidMapping: !!mapping?.trackId,
+            svgContent: '<path d="M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z"/>'
+        };
+    }
+    return { hasValidMapping: false, svgContent: '' };
+}
+
+function getOrCreateButton(container: Element): HTMLButtonElement {
+    let button = container.querySelector('button.mv-taskbar-button') as HTMLButtonElement;
+    if (button) return button;
+    
+    button = document.createElement('button');
+    button.classList.add('mv-taskbar-button');
+    button.type = 'button';
+    button.style.cssText = 'background: none; border: none; padding: 0; margin: 0; cursor: pointer; display: flex; align-items: center; justify-content: center;';
+    button.addEventListener('click', onButtonClick);
+    
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.classList.add('_icon_77f3f89');
+    svg.setAttribute('viewBox', '0 0 24 24');
+    button.appendChild(svg);
+    
+    const lastButton = container.querySelector('button[data-test="mp-toggle-now-playing"]');
+    if (lastButton) {
+        container.insertBefore(button, lastButton);
+    } else {
+        container.appendChild(button);
+    }
+    
+    return button;
+}
+
+function removeTaskbarButton() {
+    document.querySelector('button.mv-taskbar-button')?.remove();
 }

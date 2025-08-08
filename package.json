@@ -1,5 +1,5 @@
 {
-	"name": "@renskursa/tidaluna-plugins",
+	"name": "@Renskursa/tidaluna-plugins",
 	"description": "Collection of random plugins for TidaLuna",
 	"type": "module",
 	"scripts": {
