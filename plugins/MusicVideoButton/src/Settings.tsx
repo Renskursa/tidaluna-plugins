@@ -14,7 +14,7 @@ export const Settings = () => {
       <LunaSwitchSetting
         {...({
           title: "Resume position when switching",
-          desc: "If enabled, the player will resume from the same position when switching between tracks and videos. (Audio doesn't necessarily match up)",
+          desc: "Resume playback from the same position when switching between audio and video versions. (Audio doesn't necessarily match up)",
           checked: seekOnSwitch,
           onChange: (_: React.ChangeEvent<HTMLInputElement>, checked: boolean) => {
             setSeekOnSwitch((storage.seekOnSwitch = checked));
