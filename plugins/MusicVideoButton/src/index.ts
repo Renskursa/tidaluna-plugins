@@ -237,7 +237,7 @@ function scoreTitleMatch(normalizedOriginal: string, candidateTitle: string): nu
     if (!t.includes(normalizedOriginal)) return 0;
     if (!hasStrictBoundary(t, normalizedOriginal)) return 0;
     
-    const rejectKeywords = ["behind the scenes", "bts", "interview", "making of", "live", "remix", "teaser", "trailer", "snippet", "shorts", "reaction", "fan", "cover", "dance", "lyrics"];
+    const rejectKeywords = ["behind the scenes", "bts", "interview", "making of", "teaser", "trailer", "snippet", "shorts", "reaction", "fan", "cover", "dance", "lyrics"];
     for (const kw of rejectKeywords) {
         if (t.includes(kw)) return 0;
     }
