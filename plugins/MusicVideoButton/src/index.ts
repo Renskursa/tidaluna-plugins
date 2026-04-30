@@ -141,11 +141,14 @@ async function resolveMapping(media: MediaItem): Promise<{ trackId: number; vide
     if (cached) return cached;
     
     try {
-        const title = media.tidalItem?.title ?? (await media.title());
+        const rawTitle = media.tidalItem?.title ?? (await media.title());
         const artist = media.tidalItem?.artist?.name ?? (await media.artist())?.name ?? "";
         
-        if (!title) return undefined;
-        return findSongVideoPair(title, artist);
+        if (!rawTitle) return undefined;
+        
+        const cleanTitle = extractSongName(rawTitle);
+        
+        return findSongVideoPair(cleanTitle, artist);
     } catch {
         return undefined;
     }
@@ -293,6 +296,10 @@ function hasStrictBoundary(title: string, normalizedOriginal: string): boolean {
 }
 
 function extractSongName(title: string): string {
+    // Remove content in brackets/parentheses FIRST
+    let cleaned = title.replace(/[[(].*?[\])]/g, "").trim();
+    
+    // Handle trailing suffixes (case-insensitive) if they didn't use brackets
     const suffixes = [
         "official music video",
         "music video", 
@@ -303,15 +310,17 @@ function extractSongName(title: string): string {
         "video"
     ];
     
-    let cleaned = title;
+    const lowerCleaned = cleaned.toLowerCase();
     for (const suffix of suffixes) {
-        if (cleaned.endsWith(suffix)) {
+        if (lowerCleaned.endsWith(suffix)) {
             cleaned = cleaned.substring(0, cleaned.length - suffix.length).trim();
+            break;
         }
     }
     
-    // Remove content in brackets/parentheses
-    cleaned = cleaned.replace(/[[(].*?[\])]/g, "").trim();
+    // Matches " feat.", " ft.", " featuring " (case insensitive) and removes everything after it
+    cleaned = cleaned.replace(/\s+(feat\.?|ft\.?|featuring)\s+.*$/i, "").trim();
+    cleaned = cleaned.replace(/[-–—:|~*]+\s*$/, "").trim();
     
     return cleaned;
 }
