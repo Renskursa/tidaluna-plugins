@@ -12,6 +12,13 @@ const failedSearches = new Set<string>();
 const ongoingSearches = new Map<string, Promise<{ trackId: number; videoId: number } | undefined>>();
 const seekPositions = new Map<number, number>();
 
+const MATCH_WORDS = {
+    OFFICIAL: ["official music video", "official video", "official mv"],
+    VIDEO: ["music video", "mv", "video"],
+    QUALITY: ["hd", "4k", "uhd"],
+    REJECT: ["lyrics", "lyric video", "behind the scenes", "bts", "interview", "making of", "teaser", "trailer", "snippet", "shorts", "reaction", "fan", "cover", "dance"]
+};
+
 function pruneCache<K, V>(cache: Map<K, V>, maxSize = 1000, keepSize = 500) {
     if (cache.size > maxSize) {
         const entries = Array.from(cache.entries()).slice(-keepSize);
@@ -36,7 +43,7 @@ async function findBestMatchingId(items: any[], type: "track" | "video", origina
         const candidates = items.map(item => ({
             id: item.id,
             score: scoreTitleMatch(normalizedOriginal, String(item.title ?? ""))
-        })).sort((a, b) => b.score - a.score);
+        })).sort((a, b) => b.score - a.score); // 1000s will be at the top!
         
         for (const { id, score } of candidates.slice(0, 3)) {
             if (score > 0) {
@@ -191,8 +198,14 @@ MediaItem.onMediaTransition(unloads, async (media) => {
     
     const pending = seekPositions.get(Number(media.id));
     if (pending !== undefined) {
-        PlayState.seek(pending);
         seekPositions.delete(Number(media.id));
+        
+        if (media.contentType === "video") {
+            // Slight hack to ensure seek happens after video is ready
+            await new Promise(resolve => setTimeout(resolve, 500));
+        }
+        
+        PlayState.seek(pending);
     }
     
     createOrUpdateTaskbarButton().catch(() => {});
@@ -233,56 +246,54 @@ function normalizeTitle(s: string): string {
 function scoreTitleMatch(normalizedOriginal: string, candidateTitle: string): number {
     const t = normalizeTitle(candidateTitle);
     
+    if (MATCH_WORDS.REJECT.some(kw => t.includes(kw))) {
+        return 0;
+    }
+
     if (!t.includes(normalizedOriginal)) return 0;
     if (!hasStrictBoundary(t, normalizedOriginal)) return 0;
     
-    const rejectKeywords = ["behind the scenes", "bts", "interview", "making of", "teaser", "trailer", "snippet", "shorts", "reaction", "fan", "cover", "dance", "lyrics"];
-    for (const kw of rejectKeywords) {
-        if (t.includes(kw)) return 0;
+    if (MATCH_WORDS.OFFICIAL.some(kw => t.includes(kw))) {
+        return 1000; 
     }
-    
-    if (t === normalizedOriginal) return 1000;
-    
-    const officialKeywords = ["official music video", "official video", "music video", "official mv", "mv"];
-    for (const kw of officialKeywords) {
-        if (t.includes(kw)) return 900;
+
+    if (MATCH_WORDS.VIDEO.some(kw => t.includes(kw))) {
+        return 800;
     }
-    
-    const songName = extractSongName(t);
-    if (songName === normalizedOriginal) return 800;
-    
-    if (t.startsWith(normalizedOriginal + " ")) return 700;
-    if (t.startsWith(normalizedOriginal)) return 600;
-    
-    if (t.includes(" " + normalizedOriginal + " ")) return 500;
-    if (t.includes(normalizedOriginal)) return 400;
-    
-    return 0;
+
+    if (MATCH_WORDS.QUALITY.some(kw => t.includes(kw))) {
+        return 600;
+    }
+
+    if (t === normalizedOriginal) {
+        return 500;
+    }
+
+    return 100; // Minimal score for general inclusion
 }
 
 function hasStrictBoundary(title: string, normalizedOriginal: string): boolean {
     const idx = title.indexOf(normalizedOriginal);
     if (idx < 0) return false;
+    
     let after = title.slice(idx + normalizedOriginal.length).trim();
     if (after.length === 0) return true;
+    
     after = after.replace(/^[-–—:|•~*.,'"\s]+/, "").trim();
     if (after.length === 0) return true;
+
     const allowed = [
-        "official music video",
-        "official video",
-        "music video",
-        "official mv",
-        "mv",
-        "video",
-        "hd",
-        "4k",
-        "uhd"
+        ...MATCH_WORDS.OFFICIAL,
+        ...MATCH_WORDS.VIDEO,
+        ...MATCH_WORDS.QUALITY
     ];
+
     if (after.startsWith("(") || after.startsWith("[")) {
         const m = after.match(/^[(\[]\s*([^\]\)]*?)\s*[)\]](.*)$/);
         if (!m) return false;
         const content = normalizeTitle(m[1]);
         if (!allowed.includes(content)) return false;
+        
         const rest = m[2].replace(/^[-–—:|•~*.,'"\s]+/, "").trim();
         return rest.length === 0;
     }
@@ -292,33 +303,33 @@ function hasStrictBoundary(title: string, normalizedOriginal: string): boolean {
             return rest.length === 0;
         }
     }
+
     return after.length <= 8;
 }
 
 function extractSongName(title: string): string {
-    // Remove content in brackets/parentheses FIRST
-    let cleaned = title.replace(/[[(].*?[\])]/g, "").trim();
+    let cleaned = title.replace(/[[(](.*?)[\])]/g, (match, content) => {
+        const normalizedContent = content.toLowerCase().trim();
+        const allKeywords = [...MATCH_WORDS.OFFICIAL, ...MATCH_WORDS.VIDEO, ...MATCH_WORDS.QUALITY, ...MATCH_WORDS.REJECT];
+        
+        if (allKeywords.some(kw => normalizedContent.includes(kw))) {
+            return "";
+        }
+        return match;
+    }).trim();
     
-    // Handle trailing suffixes (case-insensitive) if they didn't use brackets
-    const suffixes = [
-        "official music video",
-        "music video", 
-        "official video",
-        "official mv",
-        "mv",
-        "official",
-        "video"
-    ];
+    // Remove trailing suffixes not in brackets
+    const suffixes = [...MATCH_WORDS.OFFICIAL, ...MATCH_WORDS.VIDEO, ...MATCH_WORDS.QUALITY];
+    let lowerCleaned = cleaned.toLowerCase();
     
-    const lowerCleaned = cleaned.toLowerCase();
     for (const suffix of suffixes) {
         if (lowerCleaned.endsWith(suffix)) {
             cleaned = cleaned.substring(0, cleaned.length - suffix.length).trim();
-            break;
+            lowerCleaned = cleaned.toLowerCase();
         }
     }
     
-    // Matches " feat.", " ft.", " featuring " (case insensitive) and removes everything after it
+    // Remove "feat" and trailing separators
     cleaned = cleaned.replace(/\s+(feat\.?|ft\.?|featuring)\s+.*$/i, "").trim();
     cleaned = cleaned.replace(/[-–—:|~*]+\s*$/, "").trim();
     
