@@ -201,17 +201,10 @@ MediaItem.onMediaTransition(unloads, async (media) => {
         seekPositions.delete(Number(media.id));
         
         if (media.contentType === "video") {
-                await waitUntilShakaSettled();
+                await waitUntilSeekable();
         }
         
-        console.log("[MVButton] Seeking to", pending, "on", media.contentType, media.id);
         PlayState.seek(pending);
-        
-        // Check if it actually landed
-        setTimeout(() => {
-            const actual = getCurrentSeekSeconds();
-            console.log("[MVButton] Seek result: target=", pending, "actual=", actual);
-        }, 500);
     }
     
     createOrUpdateTaskbarButton().catch(() => {});
