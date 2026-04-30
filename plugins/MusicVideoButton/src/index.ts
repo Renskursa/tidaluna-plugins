@@ -1,5 +1,5 @@
 import { LunaUnload, Tracer } from "@luna/core";
-import { MediaItem, TidalApi, redux, observe } from "@luna/lib";
+import { MediaItem, TidalApi, redux, observe, PlayState } from "@luna/lib";
 
 export { Settings } from "./Settings";
 
@@ -159,27 +159,23 @@ async function switchToMediaItem(targetId: number, type: "track" | "video", star
             seekPositions.set(targetId, startAt);
         }
         
+        PlayState.playNext([targetId]); 
+        
         const state = redux.store.getState() as any;
         const pq = state?.playQueue;
         const currentIndex = pq?.currentIndex ?? -1;
-        const currentElem = pq?.elements?.[currentIndex];
         
-        if (!pq || currentIndex < 0 || !currentElem) {
-            await redux.actions["playQueue/ADD_NOW"]({ context: { type: "active" }, mediaItemIds: [targetId] });
-            await redux.actions["playbackControls/PLAY"]();
-            return;
+        if (currentIndex >= 0) {
+            await redux.actions["playQueue/MOVE_TO"](currentIndex + 1);
+            
+            const currentElem = pq?.elements?.[currentIndex];
+            if (currentElem?.uid) {
+                await redux.actions["playQueue/REMOVE_ELEMENT"]({ uid: currentElem.uid });
+            }
         }
         
-        const context = currentElem.context ?? { type: "active" };
-        const oldUid = currentElem.uid;
+        PlayState.play();
         
-        await redux.actions["playQueue/ADD_AT_INDEX"]({ context, mediaItemIds: [targetId], index: currentIndex + 1 });
-        await redux.actions["playQueue/MOVE_TO"](currentIndex + 1);
-        await redux.actions["playbackControls/PLAY"]();
-        
-        if (oldUid) {
-            await redux.actions["playQueue/REMOVE_ELEMENT"]({ uid: oldUid });
-        }
     } catch (err) {
         trace.err.withContext("Failed to switch media item")(err as any);
     }
@@ -192,7 +188,7 @@ MediaItem.onMediaTransition(unloads, async (media) => {
     
     const pending = seekPositions.get(Number(media.id));
     if (pending !== undefined) {
-        redux.actions["playbackControls/SEEK"](pending);
+        PlayState.seek(pending);
         seekPositions.delete(Number(media.id));
     }
     
@@ -218,7 +214,7 @@ async function onButtonClick() {
 }
 
 // Monitor taskbar container
-observe(unloads, 'div._moreContainer_f6162c8', () => {
+observe(unloads, 'div._utilityButtons_4d7aaf9', () => {
     createOrUpdateTaskbarButton().catch(() => {});
 });
 
@@ -365,7 +361,7 @@ async function createOrUpdateTaskbarButton() {
         return;
     }
     
-    const container = document.querySelector('div._moreContainer_f6162c8');
+    const container = document.querySelector('div._utilityButtons_4d7aaf9');
     if (!container) {
         removeTaskbarButton();
         return;
@@ -382,13 +378,13 @@ function getButtonConfig(effectiveType: string, mapping?: { trackId: number; vid
     if (effectiveType === 'track') {
         return {
             hasValidMapping: !!mapping?.videoId,
-            svgContent: '<path d="M17 10.5V7c0-1.1-.9-2-2-2H4C2.9 5 2 5.9 2 7v10c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2v-3.5l4 4v-11l-4 4z"/>'
+            svgContent: '<path d="M 4 6 H 14 A 2 2 0 0 1 16 8 V 9 L 22 6 V 18 L 16 15 V 16 A 2 2 0 0 1 14 18 H 4 A 2 2 0 0 1 2 16 V 8 A 2 2 0 0 1 4 6 Z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>'
         };
     }
     if (effectiveType === 'video') {
         return {
             hasValidMapping: !!mapping?.trackId,
-            svgContent: '<path d="M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z"/>'
+            svgContent: '<path d="M 8.5 17 A 2.5 2.5 0 0 1 3.5 17 A 2.5 2.5 0 0 1 8.5 17 V 5 L 18.5 3 V 15 A 2.5 2.5 0 0 1 13.5 15 A 2.5 2.5 0 0 1 18.5 15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>'
         };
     }
     return { hasValidMapping: false, svgContent: '' };
@@ -399,7 +395,7 @@ function getOrCreateButton(container: Element): HTMLButtonElement {
     if (button) return button;
     
     button = document.createElement('button');
-    button.classList.add('mv-taskbar-button');
+    button.classList.add('mv-taskbar-button', 'withBackground');
     button.type = 'button';
     button.style.cssText = 'background: none; border: none; padding: 0; margin: 0; cursor: pointer; display: flex; align-items: center; justify-content: center;';
     button.addEventListener('click', onButtonClick);
@@ -407,11 +403,13 @@ function getOrCreateButton(container: Element): HTMLButtonElement {
     const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
     svg.classList.add('_icon_77f3f89');
     svg.setAttribute('viewBox', '0 0 24 24');
+    svg.style.transform = 'scale(1.2)'; 
+    
     button.appendChild(svg);
     
-    const lastButton = container.querySelector('button[data-test="mp-toggle-now-playing"]');
-    if (lastButton) {
-        container.insertBefore(button, lastButton);
+    const targetElement = container.querySelector('._sliderContainer_da74942');
+    if (targetElement) {
+        container.insertBefore(button, targetElement);
     } else {
         container.appendChild(button);
     }
