@@ -201,15 +201,49 @@ MediaItem.onMediaTransition(unloads, async (media) => {
         seekPositions.delete(Number(media.id));
         
         if (media.contentType === "video") {
-            // Slight hack to ensure seek happens after video is ready
-            await new Promise(resolve => setTimeout(resolve, 500));
+                await waitUntilShakaSettled();
         }
         
+        console.log("[MVButton] Seeking to", pending, "on", media.contentType, media.id);
         PlayState.seek(pending);
+        
+        // Check if it actually landed
+        setTimeout(() => {
+            const actual = getCurrentSeekSeconds();
+            console.log("[MVButton] Seek result: target=", pending, "actual=", actual);
+        }, 500);
     }
     
     createOrUpdateTaskbarButton().catch(() => {});
 });
+
+function waitUntilSeekable(timeoutMs = 5000): Promise<void> {
+    return new Promise((resolve) => {
+        const start = Date.now();
+
+        const check = () => {
+            if (Date.now() - start >= timeoutMs) return resolve();
+
+            const currentPos = getCurrentSeekSeconds();
+            const state = redux.store.getState() as any;
+            const pc = state?.playbackControls;
+            const duration = Number(pc?.playbackContext?.actualDuration ?? 0);
+            const playbackState = pc?.playbackState;
+
+            if (
+                (playbackState === 'PLAYING' || playbackState === 'PAUSED') &&
+                duration > 0 &&
+                currentPos < 1.0
+            ) {
+                return resolve();
+            }
+
+            requestAnimationFrame(check);
+        };
+
+        setTimeout(() => requestAnimationFrame(check), 300);
+    });
+}
 
 async function onButtonClick() {
     const { storage } = await import("./Settings");
