@@ -33,7 +33,7 @@ async function findBestMatchingId(items: any[], type: "track" | "video", origina
                 id: item.id,
                 score: scoreTitleMatch(normalizedOriginal, String(itemTitle))
             };
-        }).sort((a, b) => b.score - a.score); // 1000s will be at the top!
+        }).sort((a, b) => b.score - a.score);
         
         for (const { id, score } of candidates) {
             if (score > 0) {
@@ -238,8 +238,7 @@ async function onButtonClick() {
     }
 }
 
-// Monitor taskbar container
-observe(unloads, 'div._utilityButtons_4d7aaf9', () => {
+observe(unloads, 'div[class*="utilityButtons"]', () => {
     createOrUpdateTaskbarButton().catch(() => {});
 });
 
@@ -283,7 +282,7 @@ async function createOrUpdateTaskbarButton() {
         return;
     }
     
-    const container = document.querySelector('div._utilityButtons_4d7aaf9');
+    const container = document.querySelector('div[class*="utilityButtons"]');
     if (!container) {
         removeTaskbarButton();
         return;
@@ -315,27 +314,29 @@ function getButtonConfig(effectiveType: string, mapping?: { trackId: number; vid
 function getOrCreateButton(container: Element): HTMLButtonElement {
     let button = container.querySelector('button.mv-taskbar-button') as HTMLButtonElement;
     if (button) return button;
-    
+
     button = document.createElement('button');
-    button.classList.add('mv-taskbar-button', 'withBackground');
-    button.type = 'button';
-    button.style.cssText = 'background: none; border: none; padding: 0; margin: 0; cursor: pointer; display: flex; align-items: center; justify-content: center;';
-    button.addEventListener('click', onButtonClick);
-    
+    button.className = 'mv-taskbar-button';
+    button.onclick = onButtonClick;
+
     const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-    svg.classList.add('_icon_77f3f89');
+    const nativeClass = container.querySelector('svg')?.getAttribute('class');
+    
+    if (nativeClass) svg.setAttribute('class', nativeClass);
+    
     svg.setAttribute('viewBox', '0 0 24 24');
-    svg.style.transform = 'scale(1.2)'; 
+    svg.style.width = '24px';
+    svg.style.height = '24px';
     
     button.appendChild(svg);
-    
-    const targetElement = container.querySelector('._sliderContainer_da74942');
-    if (targetElement) {
-        container.insertBefore(button, targetElement);
+
+    const slider = container.querySelector('[class*="sliderContainer"]');
+    if (slider) {
+        slider.insertAdjacentElement('beforebegin', button);
     } else {
-        container.appendChild(button);
+        container.append(button);
     }
-    
+
     return button;
 }
 
