@@ -16,7 +16,8 @@ const MATCH_WORDS = {
     OFFICIAL: ["official music video", "official video", "official mv"],
     VIDEO: ["music video", "mv", "video"],
     QUALITY: ["hd", "4k", "uhd"],
-    REJECT: ["lyrics", "lyric video", "behind the scenes", "bts", "interview", "making of", "teaser", "trailer", "snippet", "shorts", "reaction", "fan", "cover", "dance"]
+    REJECT: ["lyrics", "lyric video", "behind the scenes", "bts", "interview", "making of", "teaser", "trailer", "snippet", "shorts", "reaction", "fan", "cover", "dance"],
+    VERSIONS: ["remix", "mix", "edit", "vip", "mashup", "version", "acoustic", "live", "instrumental", "slowed", "reverb"]
 };
 
 function pruneCache<K, V>(cache: Map<K, V>, maxSize = 1000, keepSize = 500) {
@@ -40,12 +41,15 @@ async function findBestMatchingId(items: any[], type: "track" | "video", origina
     
     const normalizedOriginal = originalTitle ? normalizeTitle(originalTitle) : undefined;
     if (normalizedOriginal) {
-        const candidates = items.map(item => ({
-            id: item.id,
-            score: scoreTitleMatch(normalizedOriginal, String(item.title ?? ""))
-        })).sort((a, b) => b.score - a.score); // 1000s will be at the top!
+        const candidates = items.map(item => {
+            const itemTitle = item.version ? `${item.title} (${item.version})` : (item.title ?? "");
+            return {
+                id: item.id,
+                score: scoreTitleMatch(normalizedOriginal, String(itemTitle))
+            };
+        }).sort((a, b) => b.score - a.score); // 1000s will be at the top!
         
-        for (const { id, score } of candidates.slice(0, 3)) {
+        for (const { id, score } of candidates) {
             if (score > 0) {
                 try {
                     await MediaItem.fromId(id, type);
@@ -148,7 +152,14 @@ async function resolveMapping(media: MediaItem): Promise<{ trackId: number; vide
     if (cached) return cached;
     
     try {
-        const rawTitle = media.tidalItem?.title ?? (await media.title());
+        let rawTitle = media.tidalItem?.title;
+        if (rawTitle && media.tidalItem?.version) {
+            rawTitle += ` (${media.tidalItem.version})`;
+        }
+        if (!rawTitle) {
+            rawTitle = await media.title();
+        }
+        
         const artist = media.tidalItem?.artist?.name ?? (await media.artist())?.name ?? "";
         
         if (!rawTitle) return undefined;
@@ -270,6 +281,14 @@ function normalizeTitle(s: string): string {
     return s.toLowerCase().replace(/\s+/g, " ").trim();
 }
 
+function getBaseString(s: string): string {
+    return s.replace(/[\(\[\{].*?[\)\]\}]/g, '')
+            .replace(/[-–—:|~*].*$/, '')
+            .replace(/\b(feat\.?|ft\.?|featuring)\b.*$/, '')
+            .replace(/\s+/g, ' ')
+            .trim();
+}
+
 function scoreTitleMatch(normalizedOriginal: string, candidateTitle: string): number {
     const t = normalizeTitle(candidateTitle);
     
@@ -277,26 +296,50 @@ function scoreTitleMatch(normalizedOriginal: string, candidateTitle: string): nu
         return 0;
     }
 
-    if (!t.includes(normalizedOriginal)) return 0;
-    if (!hasStrictBoundary(t, normalizedOriginal)) return 0;
+    for (const kw of MATCH_WORDS.VERSIONS) {
+        const regex = new RegExp(`\\b${kw}\\b`);
+        const originalHas = regex.test(normalizedOriginal);
+        const candidateHas = regex.test(t);
+        
+        if (originalHas !== candidateHas) {
+            return 0;
+        }
+    }
+
+    const baseOriginal = getBaseString(normalizedOriginal);
+    const baseCandidate = getBaseString(t);
+
+    if (!baseCandidate.includes(baseOriginal) && !baseOriginal.includes(baseCandidate)) {
+        return 0; 
+    }
+
+    if (t.includes(normalizedOriginal)) {
+        if (!hasStrictBoundary(t, normalizedOriginal)) return 0;
+        
+        if (MATCH_WORDS.OFFICIAL.some(kw => t.includes(kw))) return 1000; 
+        if (MATCH_WORDS.VIDEO.some(kw => t.includes(kw))) return 800;
+        if (MATCH_WORDS.QUALITY.some(kw => t.includes(kw))) return 600;
+        if (t === normalizedOriginal) return 500;
+        return 100; // Minimal score for general inclusion
+    }
     
-    if (MATCH_WORDS.OFFICIAL.some(kw => t.includes(kw))) {
-        return 1000; 
+    const cleanOrig = normalizedOriginal.replace(/[^a-z0-9]/g, '');
+    const cleanCand = t.replace(/[^a-z0-9]/g, '');
+    if (cleanCand.includes(cleanOrig)) return 80;
+
+    const wordsOrig = normalizedOriginal.replace(/[^a-z0-9\s]/g, '').split(/\s+/).filter(Boolean);
+    const wordsCand = t.replace(/[^a-z0-9\s]/g, '').split(/\s+/).filter(Boolean);
+    
+    let overlap = 0;
+    for (const w of wordsOrig) {
+        if (wordsCand.includes(w)) overlap++;
+    }
+    
+    if (wordsOrig.length > 0 && overlap / wordsOrig.length >= 0.8) {
+        return 50;
     }
 
-    if (MATCH_WORDS.VIDEO.some(kw => t.includes(kw))) {
-        return 800;
-    }
-
-    if (MATCH_WORDS.QUALITY.some(kw => t.includes(kw))) {
-        return 600;
-    }
-
-    if (t === normalizedOriginal) {
-        return 500;
-    }
-
-    return 100; // Minimal score for general inclusion
+    return 0;
 }
 
 function hasStrictBoundary(title: string, normalizedOriginal: string): boolean {
