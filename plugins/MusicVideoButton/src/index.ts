@@ -185,7 +185,7 @@ MediaItem.onMediaTransition(unloads, async (media) => {
         seekPositions.delete(Number(media.id));
         
         if (media.contentType === "video") {
-                await waitUntilSeekable();
+            await waitUntilSeekable(Number(media.id));
         }
         
         PlayState.seek(pending);
@@ -194,31 +194,29 @@ MediaItem.onMediaTransition(unloads, async (media) => {
     createOrUpdateTaskbarButton().catch(() => {});
 });
 
-function waitUntilSeekable(timeoutMs = 5000): Promise<void> {
+function waitUntilSeekable(targetMediaId: number, timeoutMs = 10000): Promise<void> {
     return new Promise((resolve) => {
         const start = Date.now();
 
         const check = () => {
-            if (Date.now() - start >= timeoutMs) return resolve();
-
-            const currentPos = getCurrentSeekSeconds();
-            const state = redux.store.getState() as any;
-            const pc = state?.playbackControls;
-            const duration = Number(pc?.playbackContext?.actualDuration ?? 0);
-            const playbackState = pc?.playbackState;
-
-            if (
-                (playbackState === 'PLAYING' || playbackState === 'PAUSED') &&
-                duration > 0 &&
-                currentPos < 1.0
-            ) {
+            if (Date.now() - start >= timeoutMs) {
                 return resolve();
             }
 
+            const state = redux.store.getState() as any;
+            const pc = state?.playbackControls;
+            
+            if (String(pc?.playbackContext?.actualProductId) === String(targetMediaId)) {
+                const mediaEl = document.querySelector('video, audio') as HTMLMediaElement | null;
+                
+                if (mediaEl && mediaEl.readyState >= 3) {
+                    resolve();
+                    return;
+                }
+            }
             requestAnimationFrame(check);
         };
-
-        setTimeout(() => requestAnimationFrame(check), 300);
+        setTimeout(() => requestAnimationFrame(check), 100);
     });
 }
 
