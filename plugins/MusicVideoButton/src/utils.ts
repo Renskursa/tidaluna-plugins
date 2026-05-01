@@ -5,7 +5,7 @@ const MATCH_WORDS = {
     VIDEO: ["music video", "mv", "video"],
     QUALITY: ["hd", "4k", "uhd"],
     REJECT: ["lyrics", "lyric video", "behind the scenes", "bts", "interview", "making of", "teaser", "trailer", "snippet", "shorts", "reaction", "fan", "cover", "dance"],
-    VERSIONS: ["remix", "mix", "edit", "vip", "mashup", "version", "acoustic", "live", "instrumental", "slowed", "reverb"]
+    VERSIONS: ["remix", "mix", "edit", "vip", "mashup", "version", "acoustic", "live", "instrumental", "slowed", "reverb", "remaster", "remastered", "extended", "radio", "club", "karaoke"]
 };
 
 export function pruneCache<K, V>(cache: Map<K, V>, maxSize = 1000, keepSize = 500) {
@@ -48,15 +48,20 @@ export function getEffectiveType(current?: MediaItem, fallback?: 'track' | 'vide
 }
 
 export function normalizeTitle(s: string): string {
-    return s.toLowerCase().replace(/\s+/g, " ").trim();
+    return s.toLowerCase()
+            .normalize("NFD").replace(/[\u0300-\u036f]/g, "") 
+            .replace(/['"`,.?!\u2018\u2019\u201C\u201D]/g, "") 
+            .replace(/\s+/g, " ")
+            .trim();
 }
-
 export function getBaseString(s: string): string {
-    return s.replace(/[\(\[\{].*?[\)\]\}]/g, '')
+    const stripped = s.replace(/[\(\[\{].*?[\)\]\}]/g, '')
             .replace(/[-–—:|~*].*$/, '')
             .replace(/\b(feat\.?|ft\.?|featuring)\b.*$/, '')
             .replace(/\s+/g, ' ')
             .trim();
+            
+    return stripped.length < 3 ? s.replace(/\s+/g, ' ').trim() : stripped;
 }
 
 export function scoreTitleMatch(normalizedOriginal: string, candidateTitle: string): number {
