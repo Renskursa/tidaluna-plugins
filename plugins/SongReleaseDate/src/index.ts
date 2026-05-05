@@ -30,9 +30,17 @@ function formatDate(dateStr: string, format: string) {
         .replace(/[\/\-\.\s]{2,}/g, m => m[0])
         .replace(/^[\/\-\.\s]+|[\/\-\.\s]+$/g, "");
 }
+
+const getSpanStyle = () =>
+    storage.position === "after-title"
+        ? "display: inline-flex; align-items: center; color: var(--text-secondary, #919496); font-size: 0.8rem; font-family: inherit; margin-left: 3px; white-space: nowrap; font-weight: 400; flex-shrink: 0;"
+        : "display: block; color: var(--text-secondary, #919496); font-size: 0.75rem; font-family: inherit; margin: -2px 0;";
+
 const updateNodes = () =>
     document.querySelectorAll(".luna-release-date").forEach(el => {
-        el.textContent = currentReleaseDate;
+        if (el.textContent !== currentReleaseDate) {
+            el.textContent = currentReleaseDate;
+        }
     });
 
 const prefetch = (radius = 10) => {
@@ -84,18 +92,6 @@ const applyId = async (id: string, reformat = false) => {
 const getIdFromContainer = (container: Element) =>
     container.querySelector('a[href^="/track/"]')?.getAttribute("href")?.split("/").pop();
 
-unloads.add(obyStore.on(storage, () => {
-    if (!lastId) return;
-    document.querySelectorAll(".luna-release-date").forEach(el => el.remove());
-    applyId(lastId, true);
-}));
-
-document.querySelectorAll(".luna-release-date").forEach(el => el.remove());
-unloads.add(() => document.querySelectorAll(".luna-release-date").forEach(el => el.remove()));
-
-// Prefetch immediately on load with a large radius
-prefetch(20);
-
 const getAnchor = (container: Element) => {
     switch (storage.position) {
         case "below-artist":
@@ -103,25 +99,58 @@ const getAnchor = (container: Element) => {
                 el: container.parentElement?.querySelector('[data-test="footer-artist-name"]') ?? container,
                 pos: "afterend" as InsertPosition
             };
+        case "after-title":
+            return { el: container, pos: "beforeend" as InsertPosition };
         default: // below-title
             return { el: container, pos: "afterend" as InsertPosition };
     }
 };
 
+unloads.add(obyStore.on(storage, () => {
+    if (!lastId) return;
+    document.querySelectorAll(".luna-release-date").forEach(el => el.remove());
+
+    document.querySelectorAll('[data-test="footer-track-title"]').forEach(container => {
+        if (container.parentElement?.querySelector(".luna-release-date")) return;
+        if (container.querySelector(".luna-release-date")) return;
+
+        const span = document.createElement("span");
+        span.className = "luna-release-date";
+        span.style.cssText = getSpanStyle();
+        span.textContent = currentReleaseDate;
+
+        const { el, pos } = getAnchor(container);
+        el.insertAdjacentElement(pos, span);
+    });
+
+    applyId(lastId, true);
+}));
+
+document.querySelectorAll(".luna-release-date").forEach(el => el.remove());
+unloads.add(() => document.querySelectorAll(".luna-release-date").forEach(el => el.remove()));
+
+prefetch(20);
+
 observe(unloads, '[data-test="footer-track-title"]', (container) => {
     if (container.parentElement?.querySelector(".luna-release-date")) return;
+    if (container.querySelector(".luna-release-date")) return;
 
     const span = document.createElement("span");
     span.className = "luna-release-date";
-    span.style.cssText = "display: block; color: var(--text-secondary, #919496); font-size: 0.75rem; font-family: inherit; margin: -2px 0;";
+    span.style.cssText = getSpanStyle();
     span.textContent = currentReleaseDate;
 
     const { el, pos } = getAnchor(container);
     el.insertAdjacentElement(pos, span);
 
-    const titleObserver = new MutationObserver(() => {
+    const titleObserver = new MutationObserver((mutations) => {
+        if (mutations.every(m => m.target === span || m.target.parentNode === span)) return;
+
         const id = getIdFromContainer(container);
-        if (id) { lastId = id; applyId(id); }
+        if (id && id !== lastId) {
+            lastId = id;
+            applyId(id);
+        }
     });
     titleObserver.observe(container, { characterData: true, childList: true, subtree: true });
     unloads.add(() => titleObserver.disconnect());

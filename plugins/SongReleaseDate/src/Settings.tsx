@@ -4,7 +4,7 @@ import { LunaSettings, LunaTextSetting, LunaSelectSetting, LunaSelectItem } from
 
 export const storage = await ReactiveStore.getPluginStorage("SongReleaseDate", {
     dateFormat: "DD-MM-YYYY",
-    position: "below-title" as "below-title" | "below-artist"
+    position: "after-title" as "after-title" | "below-title" | "below-artist",
 });
 
 export const Settings = () => {
@@ -27,6 +27,7 @@ export const Settings = () => {
                 value={position}
                 onChange={(e: React.ChangeEvent<{ value: unknown }>) => setPosition((storage.position = e.target.value as typeof storage.position))}
             >
+                <LunaSelectItem value="after-title">After title</LunaSelectItem>
                 <LunaSelectItem value="below-artist">Below artist</LunaSelectItem>
                 <LunaSelectItem value="below-title">Below title</LunaSelectItem>
             </LunaSelectSetting>
