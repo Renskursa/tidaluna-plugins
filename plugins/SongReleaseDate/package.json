@@ -1,0 +1,11 @@
+{
+	"name": "SongReleaseDate",
+	"description": "Displays the release date of the currently playing song below the title.",
+	"author": {
+		"name": "Renskursa",
+		"url": "https://github.com/Renskursa",
+		"avatarUrl": "https://avatars.githubusercontent.com/u/91384515"
+	},
+	"main": "./src/index.ts",
+	"type": "module"
+}
